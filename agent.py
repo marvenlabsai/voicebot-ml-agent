@@ -221,12 +221,16 @@ async def dial(ctx: JobContext, session: AgentSession, agent: Agent, config: dic
         session.start(room=ctx.room, agent=agent, room_input_options=RoomInputOptions(participant_identity=identity))
     )
 
+    # Caller ID: the org's number chosen for this call (the trunk's own number when absent)
+    from_number = config.get("fromNumber")
+
     try:
         await ctx.api.sip.create_sip_participant(
             api.CreateSIPParticipantRequest(
                 room_name=ctx.room.name,
                 sip_trunk_id=trunk,
                 sip_call_to=phone,
+                **({"sip_number": from_number} if from_number else {}),
                 participant_identity=identity,
                 participant_name=phone,
                 wait_until_answered=True,
