@@ -19,10 +19,11 @@ MATCH_TIMEOUT = int(os.getenv("SCRIPT_MATCH_TIMEOUT_MS", "150")) / 1000
 
 
 class ScriptedAgent(Agent):
-    def __init__(self, *, instructions: str, router: ScriptRouter, audio: ReplyAudio):
-        super().__init__(instructions=instructions)
+    def __init__(self, *, instructions: str, router: ScriptRouter, audio: ReplyAudio, tools: list | None = None, ender=None):
+        super().__init__(instructions=instructions, tools=tools or [])
         self._router = router
         self._audio = audio
+        self._ender = ender  # CallEnder: hangs up the way the end_call tool does
         self._ready = False
         self.step = router.start_step
         # Transcript tags, read by the entrypoint's conversation_item_added handler
@@ -95,7 +96,7 @@ class ScriptedAgent(Agent):
 
         handle = self.say_line(sc.reply, sc.id)
         if sc.next == "end":
-            asyncio.create_task(self._end_after(handle))
+            asyncio.create_task(self._end_after(handle, sc.id))
         elif sc.next != "stay":
             self.step = sc.next
         raise StopResponse()
@@ -108,9 +109,14 @@ class ScriptedAgent(Agent):
         except Exception:
             logger.warning("could not add the user's message to the chat history", exc_info=True)
 
-    async def _end_after(self, handle) -> None:
+    async def _end_after(self, handle, scenario_id: str) -> None:
+        if self._ender:
+            self._ender.ending = True  # an end_call from the LLM meanwhile is a no-op
         try:
             await handle
         finally:
-            # Closing the session runs the entrypoint's close handler, which hangs up
-            self.session.shutdown(drain=True)
+            if self._ender:
+                self._ender.end(f"Agent ended the call: script scenario {scenario_id}")
+            else:
+                # Closing the session runs the entrypoint's close handler, which hangs up
+                self.session.shutdown(drain=True)

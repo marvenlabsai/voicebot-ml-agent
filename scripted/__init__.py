@@ -13,7 +13,9 @@ from livekit.agents import Agent, AgentSession
 logger = logging.getLogger("voice-agent.script")
 
 
-def build_scripted_agent(*, prompt: str, script: dict, greeting: str, session: AgentSession, config: dict) -> Agent:
+def build_scripted_agent(
+    *, prompt: str, script: dict, greeting: str, session: AgentSession, config: dict, tools: list | None = None, ender=None
+) -> Agent:
     from .agent import ScriptedAgent
     from .reply_audio import ReplyAudio
     from .router import ScriptRouter
@@ -24,7 +26,9 @@ def build_scripted_agent(*, prompt: str, script: dict, greeting: str, session: A
     cache_key = "|".join(
         str(x) for x in (tts.provider, tts.model, config.get("voiceId") or "default", config.get("language") or "en")
     )
-    agent = ScriptedAgent(instructions=prompt, router=ScriptRouter(script), audio=ReplyAudio(tts, cache_key))
+    agent = ScriptedAgent(
+        instructions=prompt, router=ScriptRouter(script), audio=ReplyAudio(tts, cache_key), tools=tools, ender=ender
+    )
     agent.start(greeting)
     logger.info(
         "scripted replies on: %d steps, %d global scenarios",

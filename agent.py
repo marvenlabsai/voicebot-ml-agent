@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+import threading
+from collections.abc import Callable
 
 from dotenv import load_dotenv
 
@@ -20,13 +22,19 @@ from livekit.agents import (  # noqa: E402
 from livekit.agents.voice.events import CloseEvent, ConversationItemAddedEvent  # noqa: E402
 from livekit.plugins import cartesia, deepgram, openai, silero  # noqa: E402
 
+from api_tools import build_api_tools  # noqa: E402
+from end_call import CallEnder, end_call_tool  # noqa: E402
+from recording import CallRecording, flush_pending, upload  # noqa: E402
 from reporter import CallReporter, iso  # noqa: E402
+from silence import SilenceWatch  # noqa: E402
 
 logger = logging.getLogger("voice-agent")
 
 AGENT_NAME = os.getenv("AGENT_NAME", "voice-agent")
 # Hard stop for any single call (seconds)
 MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "1800"))
+# Time a finished call gets to report, finish its recording and upload it
+JOB_SHUTDOWN_SECONDS = float(os.getenv("JOB_SHUTDOWN_SECONDS", "120"))
 DEFAULT_PROMPT = "You are a helpful, friendly voice assistant. Keep your answers short and conversational."
 # Opt-in: agents with an enabled script answer matched turns with pre-synthesized lines
 SCRIPTED_REPLIES = os.getenv("SCRIPTED_REPLIES") == "1"
@@ -46,6 +54,8 @@ def to_cartesia_language(deepgram_language: str) -> str:
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
+    # Recordings an earlier process couldn't upload (backend down, crash) get another try
+    threading.Thread(target=lambda: asyncio.run(flush_pending()), name="recording-retry", daemon=True).start()
     if SCRIPTED_REPLIES:
         try:
             from scripted.router import load_model
@@ -68,17 +78,30 @@ def session_options(config: dict) -> dict:
     return {}
 
 
-def build_agent(prompt: str, greeting: str, config: dict, session: AgentSession) -> Agent:
+def build_agent(
+    prompt: str,
+    greeting: str,
+    config: dict,
+    session: AgentSession,
+    ender: CallEnder | None = None,
+    log_tool_call: Callable[[dict], None] | None = None,
+) -> Agent:
     """The plain LLM agent, or the scripted one when it's switched on for this agent."""
+    # Every call can be hung up by the agent itself
+    tools = [end_call_tool(ender, config.get("endCallMessage") or "")] if ender else []
+    # The agent's external API tools; their calls are logged into the transcript
+    tools += build_api_tools(config.get("tools"), log_tool_call or (lambda _entry: None))
     script = config.get("script")
     if wants_script(config):
         try:
             from scripted import build_scripted_agent
 
-            return build_scripted_agent(prompt=prompt, script=script, greeting=greeting, session=session, config=config)
+            return build_scripted_agent(
+                prompt=prompt, script=script, greeting=greeting, session=session, config=config, tools=tools, ender=ender
+            )
         except Exception:
             logger.exception("scripted replies failed to start; using the LLM only")
-    return Agent(instructions=prompt)
+    return Agent(instructions=prompt, tools=tools)
 
 
 async def entrypoint(ctx: JobContext):
@@ -109,6 +132,10 @@ async def entrypoint(ctx: JobContext):
     reporter = CallReporter(call_id)
     transcript: list[dict] = []
     state = {"answered": not outbound, "failed": False, "finalized": False}
+    # Set once the callee is on the line, if the backend asked for this call to be recorded
+    recording: CallRecording | None = None
+    # The end_call tool (and scripted "end" scenarios) hang up by shutting the job down
+    ender = CallEnder(lambda reason: ctx.shutdown(reason=reason))
 
     async def finalize(reason: str = ""):
         """Runs once when the job shuts down: final status + transcript to the backend."""
@@ -122,12 +149,16 @@ async def entrypoint(ctx: JobContext):
                 await reporter.send("ended", reason=reason or None, transcript=transcript)
             else:
                 await reporter.send("ended", reason="Not answered")
-            # Hang up the phone leg too (otherwise the callee could be left on silence)
+            # Hang up the phone leg too (otherwise the callee could be left on silence).
+            # When the agent hangs up a browser call, its leaving the room ends the call there.
             if outbound:
                 try:
                     await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
                 except Exception:
                     pass
+            if recording and (path := await recording.finish()):
+                await upload(path)
+                await flush_pending(budget_sec=20)
         finally:
             await reporter.aclose()
 
@@ -165,7 +196,7 @@ async def entrypoint(ctx: JobContext):
         # Callee hung up / browser left → end the job, which runs finalize()
         ctx.shutdown(reason=str(getattr(ev.reason, "value", ev.reason)))
 
-    agent = build_agent(prompt, greeting, config, session)
+    agent = build_agent(prompt, greeting, config, session, ender, log_tool_call=transcript.append)
 
     if outbound:
         if not await dial(ctx, session, agent, config, reporter, state):
@@ -173,6 +204,19 @@ async def entrypoint(ctx: JobContext):
             return
     else:
         await session.start(room=ctx.room, agent=agent)
+    ender.mark_live()
+
+    if config.get("record") and call_id:
+        try:
+            recording = CallRecording(call_id)
+            await recording.start(session)
+        except Exception:
+            logger.exception("could not start recording call %s; the call continues unrecorded", call_id)
+            recording = None
+
+    # Asks "are you still there?" when the caller goes quiet, then hangs up
+    silence = SilenceWatch(session, ender, config.get("silence"), goodbye=config.get("endCallMessage") or "")
+    silence.attach()
 
     # Safety net against calls that never end
     async def max_duration_guard():
@@ -184,6 +228,7 @@ async def entrypoint(ctx: JobContext):
 
     async def stop_guard():
         guard.cancel()
+        silence.stop()
 
     ctx.add_shutdown_callback(stop_guard)
 
@@ -192,7 +237,8 @@ async def entrypoint(ctx: JobContext):
         await (say_line(greeting) if say_line else session.say(greeting))
     else:
         await session.generate_reply(
-            instructions="Greet the user briefly and ask how you can help, in the conversation language."
+            instructions="Greet the user briefly and ask how you can help, in the conversation language.",
+            tool_choice="none",  # the opening line must never hang up
         )
 
 
@@ -268,5 +314,6 @@ if __name__ == "__main__":
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             agent_name=AGENT_NAME,  # enables explicit dispatch from the backend
+            shutdown_process_timeout=JOB_SHUTDOWN_SECONDS,
         )
     )
