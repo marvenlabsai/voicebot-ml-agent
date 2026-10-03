@@ -23,16 +23,22 @@ from livekit.agents.voice.events import CloseEvent, ConversationItemAddedEvent  
 from livekit.plugins import cartesia, deepgram, openai, silero  # noqa: E402
 
 from api_tools import build_api_tools  # noqa: E402
-from end_call import CallEnder, end_call_tool  # noqa: E402
+from end_call import CallEnder, end_call_tool, hang_up_after_goodbye  # noqa: E402
+from call_agent import CallAgent  # noqa: E402
+from capacity import worker_options  # noqa: E402
 from recording import CallRecording, flush_pending, upload  # noqa: E402
 from reporter import CallReporter, iso  # noqa: E402
 from silence import SilenceWatch  # noqa: E402
+from turn_taking import turn_handling, vad_options  # noqa: E402
+from usage import usage_report  # noqa: E402
 
 logger = logging.getLogger("voice-agent")
 
 AGENT_NAME = os.getenv("AGENT_NAME", "voice-agent")
-# Hard stop for any single call (seconds)
-MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "1800"))
+# Longest a call may run once answered: the agent's own limit (sent per call), never above 10 min.
+# MAX_CALL_SECONDS is used when the backend doesn't send one.
+MAX_CALL_CAP_SECONDS = 600
+MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "600"))
 # Time a finished call gets to report, finish its recording and upload it
 JOB_SHUTDOWN_SECONDS = float(os.getenv("JOB_SHUTDOWN_SECONDS", "120"))
 DEFAULT_PROMPT = "You are a helpful, friendly voice assistant. Keep your answers short and conversational."
@@ -53,7 +59,7 @@ def to_cartesia_language(deepgram_language: str) -> str:
 
 
 def prewarm(proc: JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = silero.VAD.load(**vad_options())
     # Recordings an earlier process couldn't upload (backend down, crash) get another try
     threading.Thread(target=lambda: asyncio.run(flush_pending()), name="recording-retry", daemon=True).start()
     if SCRIPTED_REPLIES:
@@ -65,17 +71,24 @@ def prewarm(proc: JobProcess):
             logger.exception("could not preload the script embedding model; it will load on first use")
 
 
+def call_limit_seconds(config: dict) -> int:
+    """The call's time limit: the agent's setting, else MAX_CALL_SECONDS, capped at 10 minutes."""
+    try:
+        value = int(config.get("maxCallSec") or MAX_CALL_SECONDS)
+    except (TypeError, ValueError):
+        value = MAX_CALL_SECONDS
+    return max(30, min(value, MAX_CALL_CAP_SECONDS))
+
+
 def wants_script(config: dict) -> bool:
     return SCRIPTED_REPLIES and isinstance(config.get("script"), dict)
 
 
 def session_options(config: dict) -> dict:
-    """Extra AgentSession options; none for plain agents."""
-    if wants_script(config):
-        # Preemptive generation starts an LLM reply before the turn ends; on scripted turns that
-        # reply is thrown away, so it would only cost an LLM (and TTS) request per turn.
-        return {"turn_handling": {"preemptive_generation": {"enabled": False}}}
-    return {}
+    """AgentSession options for this call: turn-taking tuned for phone calls (see turn_taking.py)."""
+    # Scripted agents skip preemptive generation: on scripted turns that reply is thrown away,
+    # so it would only cost an LLM (and TTS) request per turn.
+    return {"turn_handling": turn_handling("deepgram", scripted=wants_script(config))}
 
 
 def build_agent(
@@ -84,24 +97,32 @@ def build_agent(
     config: dict,
     session: AgentSession,
     ender: CallEnder | None = None,
-    log_tool_call: Callable[[dict], None] | None = None,
+    log_transcript: Callable[[dict], None] | None = None,
 ) -> Agent:
     """The plain LLM agent, or the scripted one when it's switched on for this agent."""
     # Every call can be hung up by the agent itself
     tools = [end_call_tool(ender, config.get("endCallMessage") or "")] if ender else []
     # The agent's external API tools; their calls are logged into the transcript
-    tools += build_api_tools(config.get("tools"), log_tool_call or (lambda _entry: None))
+    tools += build_api_tools(config.get("tools"), log_transcript or (lambda _entry: None))
     script = config.get("script")
     if wants_script(config):
         try:
             from scripted import build_scripted_agent
 
-            return build_scripted_agent(
+            agent = build_scripted_agent(
                 prompt=prompt, script=script, greeting=greeting, session=session, config=config, tools=tools, ender=ender
             )
+            agent.set_filler_words(config.get("fillerWords"))
+            agent.log_transcript = log_transcript
+            return agent
         except Exception:
             logger.exception("scripted replies failed to start; using the LLM only")
-    return Agent(instructions=prompt, tools=tools)
+    agent = CallAgent(instructions=prompt, tools=tools)
+    # "haan", "hmm"… while the agent talks don't interrupt it
+    agent.set_filler_words(config.get("fillerWords"))
+    # Notes (ignored fillers, blocked raw output) go to the transcript only, never to the LLM
+    agent.log_transcript = log_transcript
+    return agent
 
 
 async def entrypoint(ctx: JobContext):
@@ -134,6 +155,8 @@ async def entrypoint(ctx: JobContext):
     state = {"answered": not outbound, "failed": False, "finalized": False}
     # Set once the callee is on the line, if the backend asked for this call to be recorded
     recording: CallRecording | None = None
+    # The session and agent, once created (the usage report reads them at the end)
+    parts: dict = {}
     # The end_call tool (and scripted "end" scenarios) hang up by shutting the job down
     ender = CallEnder(lambda reason: ctx.shutdown(reason=reason))
 
@@ -146,7 +169,8 @@ async def entrypoint(ctx: JobContext):
             if state["failed"]:
                 pass  # already reported
             elif state["answered"]:
-                await reporter.send("ended", reason=reason or None, transcript=transcript)
+                usage = usage_report(parts["session"], parts.get("agent"), transcript) if "session" in parts else None
+                await reporter.send("ended", reason=reason or None, transcript=transcript, usage=usage)
             else:
                 await reporter.send("ended", reason="Not answered")
             # Hang up the phone leg too (otherwise the callee could be left on silence).
@@ -196,7 +220,8 @@ async def entrypoint(ctx: JobContext):
         # Callee hung up / browser left → end the job, which runs finalize()
         ctx.shutdown(reason=str(getattr(ev.reason, "value", ev.reason)))
 
-    agent = build_agent(prompt, greeting, config, session, ender, log_tool_call=transcript.append)
+    agent = build_agent(prompt, greeting, config, session, ender, log_transcript=transcript.append)
+    parts.update(session=session, agent=agent)
 
     if outbound:
         if not await dial(ctx, session, agent, config, reporter, state):
@@ -219,10 +244,16 @@ async def entrypoint(ctx: JobContext):
     silence.attach()
 
     # Safety net against calls that never end
+    # Time limit, counted from when the callee answered
+    limit = call_limit_seconds(config)
+
     async def max_duration_guard():
-        await asyncio.sleep(MAX_CALL_SECONDS)
-        logger.info("call %s hit MAX_CALL_SECONDS, ending", call_id)
-        ctx.shutdown(reason="Max call duration reached")
+        await asyncio.sleep(limit)
+        if ender.ending:
+            return
+        logger.info("call %s reached its %d s limit, ending", call_id, limit)
+        silence.stop()
+        hang_up_after_goodbye(session, ender, config.get("endCallMessage") or "", f"Max call duration reached ({limit // 60} min {limit % 60} s)".replace(" 0 s", ""))
 
     guard = asyncio.create_task(max_duration_guard())
 
@@ -261,6 +292,11 @@ async def dial(ctx: JobContext, session: AgentSession, agent: Agent, config: dic
 
     ctx.room.on("participant_connected", check_ringing)
     ctx.room.on("participant_attributes_changed", lambda _changed, p: check_ringing(p))
+
+    # No speech-to-text while it rings: no caller audio reaches the session and the STT
+    # connection (billed) isn't opened until the callee answers
+    session.input.set_audio_enabled(False)
+    agent.hold_stt_until_answered()
 
     # Start the session first so it's ready the moment the callee picks up
     session_started = asyncio.create_task(
@@ -302,6 +338,8 @@ async def dial(ctx: JobContext, session: AgentSession, agent: Agent, config: dic
         return False
 
     await session_started
+    session.input.set_audio_enabled(True)
+    agent.callee_answered()
     state["answered"] = True
     await reporter.send("answered")
     logger.info("call to %s answered", phone)
@@ -315,5 +353,7 @@ if __name__ == "__main__":
             prewarm_fnc=prewarm,
             agent_name=AGENT_NAME,  # enables explicit dispatch from the backend
             shutdown_process_timeout=JOB_SHUTDOWN_SECONDS,
+            # Calls per worker, warm processes, drain on shutdown, health check port
+            **worker_options(),
         )
     )

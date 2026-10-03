@@ -73,6 +73,23 @@ class CallEnder:
         self._hang_up(reason)
 
 
+def hang_up_after_goodbye(session, ender: CallEnder, goodbye: str, reason: str) -> None:
+    """Ends the call on the agent's own initiative (silence, time limit): says the end-call
+    message first when there is one."""
+    ender.ending = True
+    goodbye = goodbye.strip()
+    if not goodbye:
+        ender.end(reason)
+        return
+    try:
+        handle = session.say(goodbye, allow_interruptions=False)
+        handle.add_done_callback(lambda _h: ender.end(reason))
+        asyncio.get_running_loop().call_later(GOODBYE_TIMEOUT_SECONDS + len(goodbye) / CHARS_PER_SECOND, ender.end, reason)
+    except Exception:
+        logger.exception("could not say goodbye")
+        ender.end(reason)
+
+
 def end_call_tool(ender: CallEnder, goodbye: str = ""):
     """The `end_call` function tool, bound to this call's CallEnder.
 

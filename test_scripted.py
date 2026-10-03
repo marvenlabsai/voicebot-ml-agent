@@ -89,7 +89,7 @@ def test_plain_agent_never_loads_script_code():
         "print(type(a).__name__, 'fastembed' in sys.modules, 'scripted' in sys.modules)"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={"SCRIPTED_REPLIES": "0", **_base_env()})
-    assert out.stdout.split()[-3:] == ["Agent", "False", "False"], out.stderr[-2000:]
+    assert out.stdout.split()[-3:] == ["CallAgent", "False", "False"], out.stderr[-2000:]
 
 
 def test_broken_script_falls_back_to_plain_agent():
@@ -100,7 +100,7 @@ def test_broken_script_falls_back_to_plain_agent():
         "print(type(a).__name__)"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={**_base_env(), "SCRIPTED_REPLIES": "1"})
-    assert out.stdout.strip().splitlines()[-1] == "Agent", out.stderr[-2000:]
+    assert out.stdout.strip().splitlines()[-1] == "CallAgent", out.stderr[-2000:]
 
 
 def _base_env():
@@ -259,14 +259,14 @@ def test_reply_audio_cache_roundtrip(tmp_path, monkeypatch):
 
 
 def test_preemptive_generation_off_only_for_scripted_agents():
-    """Scripted agents disable preemptive generation; plain agents keep the framework default."""
+    """Scripted agents disable preemptive generation; plain agents have it on."""
     code = (
         "import agent;"
         "from livekit.agents import AgentSession;"
         "on = lambda cfg: AgentSession(**agent.session_options(cfg)).options.preemptive_generation['enabled'];"
-        "print(on({'script': {'steps': []}}), on({}), agent.session_options({}))"
+        "print(on({'script': {'steps': []}}), on({}))"
     )
     scripted = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={**_base_env(), "SCRIPTED_REPLIES": "1"})
-    assert scripted.stdout.split() == ["False", "True", "{}"], scripted.stderr[-2000:]
+    assert scripted.stdout.split() == ["False", "True"], scripted.stderr[-2000:]
     plain = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={**_base_env(), "SCRIPTED_REPLIES": "0"})
-    assert plain.stdout.split() == ["True", "True", "{}"], plain.stderr[-2000:]  # flag off: script ignored
+    assert plain.stdout.split() == ["True", "True"], plain.stderr[-2000:]  # flag off: script ignored

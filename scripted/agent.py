@@ -9,6 +9,8 @@ import time
 
 from livekit.agents import Agent, StopResponse, llm
 
+from call_agent import CallAgentMixin
+
 from .reply_audio import ReplyAudio
 from .router import ScriptRouter
 
@@ -18,7 +20,7 @@ logger = logging.getLogger("voice-agent.script")
 MATCH_TIMEOUT = int(os.getenv("SCRIPT_MATCH_TIMEOUT_MS", "150")) / 1000
 
 
-class ScriptedAgent(Agent):
+class ScriptedAgent(CallAgentMixin, Agent):
     def __init__(self, *, instructions: str, router: ScriptRouter, audio: ReplyAudio, tools: list | None = None, ender=None):
         super().__init__(instructions=instructions, tools=tools or [])
         self._router = router

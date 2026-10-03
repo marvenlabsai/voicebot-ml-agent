@@ -19,7 +19,7 @@ from typing import Any
 from livekit.agents import AgentSession
 from livekit.agents.voice.events import AgentStateChangedEvent, UserInputTranscribedEvent
 
-from end_call import CallEnder
+from end_call import CallEnder, hang_up_after_goodbye
 
 logger = logging.getLogger("voice-agent.silence")
 
@@ -107,14 +107,4 @@ class SilenceWatch:
         self.stop()
         reason = f"No response from the caller after {self.max_prompts} prompt{'s' if self.max_prompts != 1 else ''}"
         logger.info("%s, ending the call", reason)
-        self._ender.ending = True
-        if not self.goodbye:
-            self._ender.end(reason)
-            return
-        try:
-            handle = self._session.say(self.goodbye, allow_interruptions=False)
-            handle.add_done_callback(lambda _h: self._ender.end(reason))
-            asyncio.get_running_loop().call_later(20 + len(self.goodbye) / 12, self._ender.end, reason)
-        except Exception:
-            logger.exception("could not say goodbye")
-            self._ender.end(reason)
+        hang_up_after_goodbye(self._session, self._ender, self.goodbye, reason)

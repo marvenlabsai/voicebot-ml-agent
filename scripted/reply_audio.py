@@ -32,6 +32,8 @@ class ReplyAudio:
         self._cache_key = cache_key  # voice|language|model
         self._frames: dict[str, rtc.AudioFrame] = {}
         self._task: asyncio.Task | None = None
+        # Cache stats for the call's usage report
+        self.stats = {"linesFromCache": 0, "linesSynthesized": 0, "charactersSynthesized": 0, "linesPlayed": 0}
 
     def start(self, lines: list[str]) -> None:
         """Begins synthesizing in the background; play() uses whatever is ready."""
@@ -56,6 +58,10 @@ class ReplyAudio:
                         async with self._tts.synthesize(text) as stream:
                             frame = await stream.collect()
                         await asyncio.to_thread(self._write, self._path(text), frame)
+                        self.stats["linesSynthesized"] += 1
+                        self.stats["charactersSynthesized"] += len(text)
+                    else:
+                        self.stats["linesFromCache"] += 1
                     self._frames[text] = frame
                 except asyncio.CancelledError:
                     raise
@@ -94,6 +100,7 @@ class ReplyAudio:
         frame = self._frames.get(text)
         if frame is None:
             return None
+        self.stats["linesPlayed"] += 1
 
         async def frames() -> AsyncIterator[rtc.AudioFrame]:
             step = frame.sample_rate * FRAME_MS // 1000
