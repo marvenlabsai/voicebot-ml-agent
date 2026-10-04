@@ -1,0 +1,52 @@
+"""Realtime (GPT-Live) agents: built from the call config, word-for-word lines dropped."""
+
+import asyncio
+
+import agent
+from models import build, realtime_call_config, speech_config
+
+CONFIG = {
+    "mode": "realtime",
+    "language": "hi",
+    "languageName": "Hindi",
+    "realtime": {"provider": "openai", "model": "gpt-live-1", "voiceId": "cinder"},
+    "prompt": "You are a helpful assistant.",
+    "greeting": "Namaste!",
+    "endCallMessage": "Dhanyavaad!",
+    "fillerWords": ["haan"],
+    "script": {"steps": []},
+    "silence": {"enabled": True, "timeoutSec": 10, "message": "Kya aap line par hain?"},
+}
+
+
+def test_builds_gpt_live_with_the_chosen_voice(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    async def run():
+        return build("realtime", speech_config(CONFIG)["realtime"])
+
+    model = asyncio.run(run())
+    assert type(model).__name__ == "GPTLiveModel"
+    assert model._opts.model == "gpt-live-1" and model._opts.voice == "cinder"
+
+
+def test_realtime_calls_drop_word_for_word_lines_and_name_the_language():
+    c = realtime_call_config(CONFIG)
+    for key in ("greeting", "endCallMessage", "fillerWords", "script"):
+        assert key not in c
+    assert c["silence"]["message"] == "" and c["silence"]["timeoutSec"] == 10
+    assert c["prompt"].startswith("You are a helpful assistant.") and c["prompt"].endswith("Speak with the caller in Hindi.")
+
+
+def test_pipeline_calls_are_untouched():
+    pipeline = {**CONFIG, "mode": "pipeline"}
+    assert realtime_call_config(pipeline) is pipeline
+    assert speech_config(pipeline)["mode"] == "pipeline"
+
+
+def test_realtime_sessions_keep_default_turn_taking_and_skip_scripts():
+    c = realtime_call_config(CONFIG)
+    assert agent.session_options(c) == {}
+    assert not agent.wants_script(c)
+    a = agent.build_agent(c["prompt"], "", c, session=None)
+    assert type(a).__name__ == "CallAgent" and a._filler is None

@@ -26,7 +26,7 @@ from api_tools import build_api_tools  # noqa: E402
 from end_call import CallEnder, end_call_tool, hang_up_after_goodbye  # noqa: E402
 from call_agent import CallAgent  # noqa: E402
 from capacity import worker_options  # noqa: E402
-from models import build, speech_config  # noqa: E402
+from models import build, is_realtime, realtime_call_config, speech_config  # noqa: E402
 from recording import CallRecording, flush_pending, upload  # noqa: E402
 from reporter import CallReporter, iso  # noqa: E402
 from silence import SilenceWatch  # noqa: E402
@@ -73,7 +73,10 @@ def wants_script(config: dict) -> bool:
 
 
 def session_options(config: dict) -> dict:
-    """AgentSession options for this call: turn-taking tuned for phone calls (see turn_taking.py)."""
+    """AgentSession options for this call: turn-taking tuned for phone calls (see turn_taking.py).
+    A realtime model takes its own turns, so it keeps the framework defaults."""
+    if is_realtime(config):
+        return {}
     # Scripted agents skip preemptive generation: on scripted turns that reply is thrown away,
     # so it would only cost an LLM (and TTS) request per turn.
     stt_provider = speech_config(config)["stt"]["provider"]
@@ -124,22 +127,25 @@ async def entrypoint(ctx: JobContext):
 
     call_id = config.get("callId")
     outbound = config.get("direction") == "outbound"
+    # Realtime calls drop the word-for-word lines and pipeline-only features (see models.py)
+    config = realtime_call_config(config)
+    realtime = is_realtime(config)
     prompt = config.get("prompt") or DEFAULT_PROMPT
     greeting = (config.get("greeting") or "").strip()
     # Language and the STT / LLM / TTS chosen on the agent (see models.py)
     speech = speech_config(config)
 
     logger.info(
-        "Starting call=%s room=%s %s agent=%s (%s) language=%s stt=%s/%s llm=%s/%s tts=%s/%s",
+        "Starting call=%s room=%s %s agent=%s (%s) language=%s models=%s",
         call_id,
         ctx.room.name,
         f"outbound to {config.get('phoneNumber')}" if outbound else "web",
         config.get("agentId"),
         config.get("agentName"),
         config.get("language") or "en",
-        speech["stt"]["provider"], speech["stt"]["model"],
-        speech["llm"]["provider"], speech["llm"]["model"],
-        speech["tts"]["provider"], speech["tts"]["model"],
+        f"realtime {speech['realtime']['provider']}/{speech['realtime']['model']} voice={speech['realtime']['voiceId']}"
+        if realtime
+        else f"stt {speech['stt']['provider']}/{speech['stt']['model']}, llm {speech['llm']['provider']}/{speech['llm']['model']}, tts {speech['tts']['provider']}/{speech['tts']['model']}",
     )
 
     reporter = CallReporter(call_id)
@@ -182,13 +188,13 @@ async def entrypoint(ctx: JobContext):
 
     await ctx.connect()
 
-    session = AgentSession(
-        vad=ctx.proc.userdata["vad"],
-        stt=build("stt", speech["stt"]),
-        llm=build("llm", speech["llm"]),
-        tts=build("tts", speech["tts"]),
-        **session_options(config),
+    # VAD stays on in realtime mode too: it lets the framework notice the caller barging in
+    models = (
+        {"llm": build("realtime", speech["realtime"])}
+        if realtime
+        else {"stt": build("stt", speech["stt"]), "llm": build("llm", speech["llm"]), "tts": build("tts", speech["tts"])}
     )
+    session = AgentSession(vad=ctx.proc.userdata["vad"], **models, **session_options(config))
 
     @session.on("conversation_item_added")
     def _on_item(ev: ConversationItemAddedEvent):
@@ -228,7 +234,7 @@ async def entrypoint(ctx: JobContext):
             recording = None
 
     # Asks "are you still there?" when the caller goes quiet, then hangs up
-    silence = SilenceWatch(session, ender, config.get("silence"), goodbye=config.get("endCallMessage") or "")
+    silence = SilenceWatch(session, ender, config.get("silence"), goodbye=config.get("endCallMessage") or "", realtime=realtime)
     silence.attach()
 
     # Safety net against calls that never end
@@ -255,10 +261,9 @@ async def entrypoint(ctx: JobContext):
         say_line = getattr(agent, "say_line", None)  # scripted agents play the cached greeting
         await (say_line(greeting) if say_line else session.say(greeting))
     else:
-        await session.generate_reply(
-            instructions="Greet the user briefly and ask how you can help, in the conversation language.",
-            tool_choice="none",  # the opening line must never hang up
-        )
+        instructions = "Greet the user briefly and ask how you can help, in the conversation language."
+        # The opening line must never hang up; a realtime model takes no per-reply tool choice
+        await session.generate_reply(instructions=instructions, **({} if realtime else {"tool_choice": "none"}))
 
 
 async def dial(ctx: JobContext, session: AgentSession, agent: Agent, config: dict, reporter: CallReporter, state: dict) -> bool:

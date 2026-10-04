@@ -32,7 +32,9 @@ ASK_INSTRUCTIONS = (
 
 
 class SilenceWatch:
-    def __init__(self, session: AgentSession, ender: CallEnder, config: dict[str, Any] | None, goodbye: str = ""):
+    def __init__(
+        self, session: AgentSession, ender: CallEnder, config: dict[str, Any] | None, goodbye: str = "", realtime: bool = False
+    ):
         config = config or {}
         self.enabled = config.get("enabled", True) is not False
         self.timeout = float(config.get("timeoutSec") or DEFAULT_TIMEOUT_SECONDS)
@@ -41,6 +43,7 @@ class SilenceWatch:
         self.goodbye = goodbye.strip()
         self._session = session
         self._ender = ender
+        self._realtime = realtime  # realtime models take no per-reply tool choice
         self._timer: asyncio.TimerHandle | None = None
         self._live = False
         self.prompts = 0  # unanswered asks so far
@@ -97,7 +100,7 @@ class SilenceWatch:
             if self.message:
                 self._session.say(self.message)
             else:
-                self._session.generate_reply(instructions=ASK_INSTRUCTIONS, tool_choice="none")
+                self._session.generate_reply(instructions=ASK_INSTRUCTIONS, **({} if self._realtime else {"tool_choice": "none"}))
         except Exception:
             logger.exception("could not ask whether the caller is still there")
             self._start()

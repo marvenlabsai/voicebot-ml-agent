@@ -1,9 +1,17 @@
-"""The STT, LLM and TTS a call runs on, built from what the backend sends with the call:
+"""The models a call runs on, built from what the backend sends with the call.
 
+Pipeline mode (speech-to-text, LLM and text-to-speech):
+
+    "mode": "pipeline",
     "language": "hi",
     "stt": {"provider": "deepgram", "model": "nova-3", "language": "hi"},
     "llm": {"provider": "cerebras", "model": "gpt-oss-120b"},
     "tts": {"provider": "cartesia", "model": "sonic-3.6", "voiceId": "…", "language": "hi"},
+
+Realtime mode (one speech-to-speech model that listens and speaks with its own voice):
+
+    "mode": "realtime",
+    "realtime": {"provider": "openai", "model": "gpt-live-1", "voiceId": "marin"},
 
 Each provider gets its own language tag (the backend looks them up per language). Adding a
 provider means adding a builder below and the option in backend/src/lib/catalog.js.
@@ -12,6 +20,7 @@ provider means adding a builder below and the option in backend/src/lib/catalog.
 from __future__ import annotations
 
 import logging
+import os
 
 from livekit.plugins import cartesia, deepgram, openai
 
@@ -21,7 +30,11 @@ DEFAULTS = {
     "stt": {"provider": "deepgram", "model": "nova-3"},
     "llm": {"provider": "cerebras", "model": "gpt-oss-120b"},
     "tts": {"provider": "cartesia", "model": "sonic-3.6"},
+    "realtime": {"provider": "openai", "model": "gpt-live-1", "voiceId": "marin"},
 }
+
+# GPT-Live hands reasoning and tool calls to a backend model; empty = OpenAI's default for it
+GPT_LIVE_BACKEND_MODEL = os.getenv("GPT_LIVE_BACKEND_MODEL", "")
 
 STT_BUILDERS = {
     "deepgram": lambda c: deepgram.STT(model=c["model"], language=c["language"]),
@@ -32,19 +45,30 @@ LLM_BUILDERS = {
 TTS_BUILDERS = {
     "cartesia": lambda c: cartesia.TTS(model=c["model"], language=c["language"], **({"voice": c["voiceId"]} if c.get("voiceId") else {})),
 }
-BUILDERS = {"stt": STT_BUILDERS, "llm": LLM_BUILDERS, "tts": TTS_BUILDERS}
+REALTIME_BUILDERS = {
+    "openai": lambda c: openai.realtime.GPTLiveModel(
+        model=c["model"],
+        voice=c.get("voiceId") or "marin",
+        **({"responses_options": {"model": GPT_LIVE_BACKEND_MODEL}} if GPT_LIVE_BACKEND_MODEL else {}),
+    ),
+}
+BUILDERS = {"stt": STT_BUILDERS, "llm": LLM_BUILDERS, "tts": TTS_BUILDERS, "realtime": REALTIME_BUILDERS}
+
+
+def is_realtime(config: dict) -> bool:
+    return config.get("mode") == "realtime"
 
 
 def speech_config(config: dict) -> dict:
-    """stt/llm/tts settings for this call; an unknown provider falls back to the default one."""
+    """stt/llm/tts (or realtime) settings for this call; an unknown provider falls back to the default."""
     language = config.get("language") or "en"
-    out = {}
+    out = {"mode": "realtime" if is_realtime(config) else "pipeline"}
     for kind, default in DEFAULTS.items():
         c = {**default, **(config.get(kind) or {})}
         if c["provider"] not in BUILDERS[kind]:
             logger.warning("unknown %s provider %r, using %s", kind, c["provider"], default["provider"])
             c = {**default, **({"voiceId": c["voiceId"]} if kind == "tts" and c.get("voiceId") else {})}
-        if kind != "llm":
+        if kind in ("stt", "tts"):
             c.setdefault("language", language)
         out[kind] = c
     return out
@@ -52,3 +76,17 @@ def speech_config(config: dict) -> dict:
 
 def build(kind: str, c: dict):
     return BUILDERS[kind][c["provider"]](c)
+
+
+def realtime_call_config(config: dict) -> dict:
+    """A realtime model speaks only through its own audio, so lines meant to be spoken word for
+    word (opening line, end-call message, silence prompt) and features built on the speech
+    pipeline (filler-word filter, scripted replies) don't apply; the model is told the language."""
+    if not is_realtime(config):
+        return config
+    language = config.get("languageName") or config.get("language") or "English"
+    prompt = (config.get("prompt") or "").rstrip()
+    out = {k: v for k, v in config.items() if k not in ("greeting", "endCallMessage", "fillerWords", "script")}
+    out["prompt"] = f"{prompt}\n\nSpeak with the caller in {language}."
+    out["silence"] = {**(config.get("silence") or {}), "message": ""}
+    return out

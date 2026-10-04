@@ -29,6 +29,7 @@ def usage_report(session: AgentSession, agent: object, transcript: list[dict]) -
     llm = {"inputTokens": 0, "cachedInputTokens": 0, "outputTokens": 0}
     tts = {"characters": 0, "audioSec": 0.0}
     stt = {"audioSec": 0.0}
+    realtime_sec = 0.0  # realtime (speech-to-speech) models are billed by session time
     models = []
     for u in model_usage:
         kind = getattr(u, "type", "")
@@ -37,7 +38,12 @@ def usage_report(session: AgentSession, agent: object, transcript: list[dict]) -
             llm["inputTokens"] += u.input_tokens
             llm["cachedInputTokens"] += u.input_cached_tokens
             llm["outputTokens"] += u.output_tokens
-            models.append({"kind": "llm", **base, "inputTokens": u.input_tokens, "cachedInputTokens": u.input_cached_tokens, "outputTokens": u.output_tokens})
+            session = getattr(u, "session_duration", 0.0) or 0.0
+            realtime_sec += session
+            entry = {"kind": "llm", **base, "inputTokens": u.input_tokens, "cachedInputTokens": u.input_cached_tokens, "outputTokens": u.output_tokens}
+            if session:
+                entry["sessionSec"] = _r(session)
+            models.append(entry)
         elif kind == "tts_usage":
             tts["characters"] += u.characters_count
             tts["audioSec"] += u.audio_duration
@@ -52,6 +58,7 @@ def usage_report(session: AgentSession, agent: object, transcript: list[dict]) -
         "llm": llm,
         "tts": tts,
         "stt": stt,
+        "realtimeSec": _r(realtime_sec),
         "models": models,
         "toolCalls": sum(1 for t in transcript if t.get("role") == "tool" and not t.get("tool", {}).get("skipped") and t.get("tool", {}).get("ms") is not None),
     }

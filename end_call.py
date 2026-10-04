@@ -116,8 +116,9 @@ def end_call_tool(ender: CallEnder, goodbye: str = ""):
         why = " ".join((reason or "conversation finished").split())[:MAX_REASON_CHARS]
         try:
             context.disallow_interruptions()  # the goodbye shouldn't be cut off
-        except RuntimeError:
-            pass  # the turn was already interrupted; we still hang up once it's done
+        except Exception:
+            # Already interrupted, or a realtime model (it decides its own turns); we still hang up
+            pass
 
         def hang_up(_handle=None) -> None:
             ender.end(f"Agent ended the call: {why}")
