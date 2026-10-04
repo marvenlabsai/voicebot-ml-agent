@@ -24,7 +24,7 @@ def build_scripted_agent(
     if tts is None:
         raise RuntimeError("the session has no TTS")
     cache_key = "|".join(
-        str(x) for x in (tts.provider, tts.model, config.get("voiceId") or "default", config.get("language") or "en")
+        str(x) for x in (tts.provider, tts.model, (config.get("tts") or {}).get("voiceId") or "default", config.get("language") or "en")
     )
     agent = ScriptedAgent(
         instructions=prompt, router=ScriptRouter(script), audio=ReplyAudio(tts, cache_key), tools=tools, ender=ender

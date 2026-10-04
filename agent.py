@@ -20,12 +20,13 @@ from livekit.agents import (  # noqa: E402
     cli,
 )
 from livekit.agents.voice.events import CloseEvent, ConversationItemAddedEvent  # noqa: E402
-from livekit.plugins import cartesia, deepgram, openai, silero  # noqa: E402
+from livekit.plugins import silero  # noqa: E402
 
 from api_tools import build_api_tools  # noqa: E402
 from end_call import CallEnder, end_call_tool, hang_up_after_goodbye  # noqa: E402
 from call_agent import CallAgent  # noqa: E402
 from capacity import worker_options  # noqa: E402
+from models import build, speech_config  # noqa: E402
 from recording import CallRecording, flush_pending, upload  # noqa: E402
 from reporter import CallReporter, iso  # noqa: E402
 from silence import SilenceWatch  # noqa: E402
@@ -44,19 +45,6 @@ JOB_SHUTDOWN_SECONDS = float(os.getenv("JOB_SHUTDOWN_SECONDS", "120"))
 DEFAULT_PROMPT = "You are a helpful, friendly voice assistant. Keep your answers short and conversational."
 # Opt-in: agents with an enabled script answer matched turns with pre-synthesized lines
 SCRIPTED_REPLIES = os.getenv("SCRIPTED_REPLIES") == "1"
-
-# Languages Cartesia Sonic can speak. Anything else falls back to English.
-CARTESIA_LANGUAGES = {
-    "en", "fr", "de", "es", "pt", "zh", "ja", "hi", "it",
-    "ko", "nl", "pl", "ru", "sv", "tr",
-}
-
-
-def to_cartesia_language(deepgram_language: str) -> str:
-    """Map a Deepgram language code (e.g. 'en-US', 'multi') to a Cartesia one (e.g. 'en')."""
-    base = deepgram_language.split("-")[0].lower()
-    return base if base in CARTESIA_LANGUAGES else "en"
-
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load(**vad_options())
@@ -88,7 +76,8 @@ def session_options(config: dict) -> dict:
     """AgentSession options for this call: turn-taking tuned for phone calls (see turn_taking.py)."""
     # Scripted agents skip preemptive generation: on scripted turns that reply is thrown away,
     # so it would only cost an LLM (and TTS) request per turn.
-    return {"turn_handling": turn_handling("deepgram", scripted=wants_script(config))}
+    stt_provider = speech_config(config)["stt"]["provider"]
+    return {"turn_handling": turn_handling(stt_provider, scripted=wants_script(config))}
 
 
 def build_agent(
@@ -137,17 +126,20 @@ async def entrypoint(ctx: JobContext):
     outbound = config.get("direction") == "outbound"
     prompt = config.get("prompt") or DEFAULT_PROMPT
     greeting = (config.get("greeting") or "").strip()
-    voice_id = config.get("voiceId")
-    language = config.get("language") or "en"
+    # Language and the STT / LLM / TTS chosen on the agent (see models.py)
+    speech = speech_config(config)
 
     logger.info(
-        "Starting call=%s room=%s %s agent=%s (%s) language=%s",
+        "Starting call=%s room=%s %s agent=%s (%s) language=%s stt=%s/%s llm=%s/%s tts=%s/%s",
         call_id,
         ctx.room.name,
         f"outbound to {config.get('phoneNumber')}" if outbound else "web",
         config.get("agentId"),
         config.get("agentName"),
-        language,
+        config.get("language") or "en",
+        speech["stt"]["provider"], speech["stt"]["model"],
+        speech["llm"]["provider"], speech["llm"]["model"],
+        speech["tts"]["provider"], speech["tts"]["model"],
     )
 
     reporter = CallReporter(call_id)
@@ -190,15 +182,11 @@ async def entrypoint(ctx: JobContext):
 
     await ctx.connect()
 
-    tts_kwargs = {"model": "sonic-2", "language": to_cartesia_language(language)}
-    if voice_id:
-        tts_kwargs["voice"] = voice_id
-
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
-        stt=deepgram.STT(model="nova-3", language=language),
-        llm=openai.LLM.with_cerebras(model="gpt-oss-120b"),
-        tts=cartesia.TTS(**tts_kwargs),
+        stt=build("stt", speech["stt"]),
+        llm=build("llm", speech["llm"]),
+        tts=build("tts", speech["tts"]),
         **session_options(config),
     )
 

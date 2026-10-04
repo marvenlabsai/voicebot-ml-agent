@@ -32,8 +32,8 @@ RUN python agent.py download-files \
     && if [ "$PRELOAD_SCRIPT_MODEL" = "1" ]; then python -c "from scripted.router import load_model; load_model()"; fi \
     && mkdir -p .cache/recordings
 
-# Recordings waiting for upload survive restarts when this is a volume
-VOLUME ["/app/.cache/recordings"]
+# Recordings waiting for upload live in /app/.cache/recordings. To keep them across restarts,
+# mount a volume there (docker run -v …, or a Railway Volume; Railway doesn't allow VOLUME here).
 
 EXPOSE 8081
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
