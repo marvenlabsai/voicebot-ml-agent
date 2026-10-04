@@ -21,7 +21,10 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-RUN useradd --create-home --uid 1000 agent
+# Non-root user that owns /app, so it can write its caches (.cache/recordings, .cache/tts, .cache/models)
+RUN useradd --create-home --uid 1000 agent \
+    && mkdir -p /app/.cache/recordings \
+    && chown -R agent:agent /app
 COPY --chown=agent:agent . .
 USER agent
 
@@ -29,8 +32,7 @@ USER agent
 # replies embedding model (~220 MB) so the first scripted call doesn't download it.
 ARG PRELOAD_SCRIPT_MODEL=0
 RUN python agent.py download-files \
-    && if [ "$PRELOAD_SCRIPT_MODEL" = "1" ]; then python -c "from scripted.router import load_model; load_model()"; fi \
-    && mkdir -p .cache/recordings
+    && if [ "$PRELOAD_SCRIPT_MODEL" = "1" ]; then python -c "from scripted.router import load_model; load_model()"; fi
 
 # Recordings waiting for upload live in /app/.cache/recordings. To keep them across restarts,
 # mount a volume there (docker run -v …, or a Railway Volume; Railway doesn't allow VOLUME here).
