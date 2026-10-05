@@ -1,9 +1,9 @@
-"""Realtime (GPT-Live) agents: built from the call config, word-for-word lines dropped."""
+"""Realtime (GPT-Live) agents: built from the call config; the opening line kept, other word-for-word lines dropped."""
 
 import asyncio
 
 import agent
-from models import build, realtime_call_config, speech_config
+from models import build, opening_line_instructions, realtime_call_config, speech_config
 
 CONFIG = {
     "mode": "realtime",
@@ -30,9 +30,10 @@ def test_builds_gpt_live_with_the_chosen_voice(monkeypatch):
     assert model._opts.model == "gpt-live-1" and model._opts.voice == "cinder"
 
 
-def test_realtime_calls_drop_word_for_word_lines_and_name_the_language():
+def test_realtime_calls_keep_the_opening_line_drop_other_lines_and_name_the_language():
     c = realtime_call_config(CONFIG)
-    for key in ("greeting", "endCallMessage", "fillerWords", "script"):
+    assert c["greeting"] == "Namaste!"
+    for key in ("endCallMessage", "fillerWords", "script"):
         assert key not in c
     assert c["silence"]["message"] == "" and c["silence"]["timeoutSec"] == 10
     assert c["prompt"].startswith("You are a helpful assistant.") and c["prompt"].endswith("Speak with the caller in Hindi.")
@@ -64,3 +65,8 @@ def test_builds_gemini_live_without_thinking_settings(monkeypatch):
     assert type(model).__module__.startswith("livekit.plugins.google")
     assert model._opts.model == "gemini-3.8-live" and model._opts.voice == "Kore"
     assert not model._opts.thinking_config  # 3.8 rejects thinking settings
+
+
+def test_opening_line_is_asked_for_verbatim():
+    text = opening_line_instructions("Namaste Asha ji!")
+    assert text.endswith("\n\nNamaste Asha ji!") and "word for word" in text

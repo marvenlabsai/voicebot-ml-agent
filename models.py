@@ -93,14 +93,23 @@ def build(kind: str, c: dict):
 
 
 def realtime_call_config(config: dict) -> dict:
-    """A realtime model speaks only through its own audio, so lines meant to be spoken word for
-    word (opening line, end-call message, silence prompt) and features built on the speech
-    pipeline (filler-word filter, scripted replies) don't apply; the model is told the language."""
+    """A realtime model speaks only through its own audio. The opening line is kept (it's asked
+    for word for word, see opening_line_instructions); the end-call message, silence prompt and
+    features built on the speech pipeline (filler-word filter, scripted replies) don't apply.
+    The model is told the language."""
     if not is_realtime(config):
         return config
     language = config.get("languageName") or config.get("language") or "English"
     prompt = (config.get("prompt") or "").rstrip()
-    out = {k: v for k, v in config.items() if k not in ("greeting", "endCallMessage", "fillerWords", "script")}
+    out = {k: v for k, v in config.items() if k not in ("endCallMessage", "fillerWords", "script")}
     out["prompt"] = f"{prompt}\n\nSpeak with the caller in {language}."
     out["silence"] = {**(config.get("silence") or {}), "message": ""}
     return out
+
+
+def opening_line_instructions(greeting: str) -> str:
+    """A realtime model has no "say this text" call; it's asked to open with the line verbatim."""
+    return (
+        "Open the call now with the exact text below, word for word. Do not add, drop or change "
+        "any words, and do not wait for the caller to speak first.\n\n" + greeting
+    )
