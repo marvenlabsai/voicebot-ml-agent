@@ -56,6 +56,8 @@ AGENT_NAME = os.getenv("AGENT_NAME", "voice-agent")
 # MAX_CALL_SECONDS is used when the backend doesn't send one.
 MAX_CALL_CAP_SECONDS = 600
 MAX_CALL_SECONDS = int(os.getenv("MAX_CALL_SECONDS", "600"))
+# How long a browser call waits for the browser to join its room
+WEB_JOIN_TIMEOUT_SECONDS = int(os.getenv("WEB_JOIN_TIMEOUT_SECONDS", "60"))
 # Time a finished call gets to report, finish its recording and upload it
 JOB_SHUTDOWN_SECONDS = float(os.getenv("JOB_SHUTDOWN_SECONDS", "120"))
 DEFAULT_PROMPT = "You are a helpful, friendly voice assistant. Keep your answers short and conversational."
@@ -238,6 +240,14 @@ async def entrypoint(ctx: JobContext):
             ctx.shutdown(reason="dial failed")
             return
     else:
+        # Browser calls: the room is created before the browser joins; don't wait for a tab
+        # that never arrives (closed page, public-link misuse)
+        try:
+            await asyncio.wait_for(ctx.wait_for_participant(), WEB_JOIN_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.info("call %s: nobody joined within %d s, ending", call_id, WEB_JOIN_TIMEOUT_SECONDS)
+            ctx.shutdown(reason="Nobody joined the call")
+            return
         await session.start(room=ctx.room, agent=agent)
     ender.mark_live()
 
