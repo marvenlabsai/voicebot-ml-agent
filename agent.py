@@ -35,6 +35,22 @@ from usage import usage_report  # noqa: E402
 
 logger = logging.getLogger("voice-agent")
 
+
+class _ShowProviderErrorDetail(logging.Filter):
+    """LiveKit's OpenAI plugin logs the provider's error body only as hidden log metadata
+    ("lk.pii.error"), so plain log lines just say "gpt-live returned an error". Put it in the
+    message so the reason (bad key, no model access, quota, …) shows up in the logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        detail = getattr(record, "lk.pii.error", None)
+        if detail:
+            record.msg = f"{record.getMessage()}: {detail}"
+            record.args = ()
+        return True
+
+
+logging.getLogger("livekit.plugins.openai").addFilter(_ShowProviderErrorDetail())
+
 AGENT_NAME = os.getenv("AGENT_NAME", "voice-agent")
 # Longest a call may run once answered: the agent's own limit (sent per call), never above 10 min.
 # MAX_CALL_SECONDS is used when the backend doesn't send one.

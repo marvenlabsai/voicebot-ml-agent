@@ -12,6 +12,7 @@ Realtime mode (one speech-to-speech model that listens and speaks with its own v
 
     "mode": "realtime",
     "realtime": {"provider": "openai", "model": "gpt-live-1", "voiceId": "marin"},
+    (or {"provider": "google", "model": "gemini-3.8-live", "voiceId": "Puck"})
 
 Each provider gets its own language tag (the backend looks them up per language). Adding a
 provider means adding a builder below and the option in backend/src/lib/catalog.js.
@@ -45,12 +46,25 @@ LLM_BUILDERS = {
 TTS_BUILDERS = {
     "cartesia": lambda c: cartesia.TTS(model=c["model"], language=c["language"], **({"voice": c["voiceId"]} if c.get("voiceId") else {})),
 }
+def _gemini_live(c: dict):
+    """Gemini Live (e.g. gemini-3.8-live). It picks the spoken language itself (the prompt names
+    it), and 3.8 rejects thinking settings and affective dialog, so neither is sent."""
+    from livekit.plugins import google  # only loaded for agents that use it
+
+    return google.realtime.RealtimeModel(
+        model=c["model"],
+        voice=c.get("voiceId") or "Puck",
+        api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
+    )
+
+
 REALTIME_BUILDERS = {
     "openai": lambda c: openai.realtime.GPTLiveModel(
         model=c["model"],
         voice=c.get("voiceId") or "marin",
         **({"responses_options": {"model": GPT_LIVE_BACKEND_MODEL}} if GPT_LIVE_BACKEND_MODEL else {}),
     ),
+    "google": _gemini_live,
 }
 BUILDERS = {"stt": STT_BUILDERS, "llm": LLM_BUILDERS, "tts": TTS_BUILDERS, "realtime": REALTIME_BUILDERS}
 

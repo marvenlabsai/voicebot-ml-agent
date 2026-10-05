@@ -1,5 +1,5 @@
 # 1.8+: turn-handling options, session usage and RecorderIO used by this agent
-livekit-agents[deepgram,cartesia,openai,silero]~=1.8
+livekit-agents[deepgram,cartesia,openai,silero,google]~=1.8
 python-dotenv>=1.0
 # Scripted replies (only loaded when SCRIPTED_REPLIES=1)
 fastembed>=0.7

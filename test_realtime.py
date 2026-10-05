@@ -50,3 +50,17 @@ def test_realtime_sessions_keep_default_turn_taking_and_skip_scripts():
     assert not agent.wants_script(c)
     a = agent.build_agent(c["prompt"], "", c, session=None)
     assert type(a).__name__ == "CallAgent" and a._filler is None
+
+
+def test_builds_gemini_live_without_thinking_settings(monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "test")  # either variable name works
+
+    async def run():
+        cfg = {**CONFIG, "realtime": {"provider": "google", "model": "gemini-3.8-live", "voiceId": "Kore"}}
+        return build("realtime", speech_config(cfg)["realtime"])
+
+    model = asyncio.run(run())
+    assert type(model).__module__.startswith("livekit.plugins.google")
+    assert model._opts.model == "gemini-3.8-live" and model._opts.voice == "Kore"
+    assert not model._opts.thinking_config  # 3.8 rejects thinking settings
