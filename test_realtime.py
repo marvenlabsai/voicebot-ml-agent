@@ -65,8 +65,97 @@ def test_builds_gemini_live_without_thinking_settings(monkeypatch):
     assert type(model).__module__.startswith("livekit.plugins.google")
     assert model._opts.model == "gemini-3.8-live" and model._opts.voice == "Kore"
     assert not model._opts.thinking_config  # 3.8 rejects thinking settings
+    # Low start-of-speech sensitivity; speech detection (and barge-in) stays on
+    detection = model._opts.realtime_input_config.automatic_activity_detection
+    assert detection.start_of_speech_sensitivity.value == "START_SENSITIVITY_LOW" and not detection.disabled
+    assert model.capabilities.turn_detection
 
 
 def test_opening_line_is_asked_for_verbatim():
     text = opening_line_instructions("Namaste Asha ji!")
     assert text.endswith("\n\nNamaste Asha ji!") and "word for word" in text
+
+
+# --- opening line: caller audio paused while a realtime model greets -------------------------
+
+from opening import GREET_INSTRUCTIONS, speak_opening_line  # noqa: E402
+
+
+class _Handle:
+    def __init__(self, playout):
+        self._playout = playout
+
+    async def wait_for_playout(self):
+        await self._playout()
+
+    def __await__(self):  # like LiveKit's SpeechHandle
+        return self.wait_for_playout().__await__()
+
+
+class _FakeSession:
+    def __init__(self, playout=None):
+        self.audio = []  # set_audio_enabled calls, in order
+        self.replies = []
+        self.said = []
+        self.input = self
+        self._playout = playout or (lambda: asyncio.sleep(0))
+
+    def set_audio_enabled(self, on):
+        self.audio.append(on)
+
+    def generate_reply(self, **kw):
+        # Caller audio must already be off when the reply starts
+        self.replies.append((kw, list(self.audio)))
+        return _Handle(self._playout)
+
+    async def say(self, text):
+        self.said.append(text)
+
+
+def test_realtime_opening_line_pauses_caller_audio_until_it_has_played():
+    s = _FakeSession()
+    asyncio.run(speak_opening_line(s, object(), "Namaste!", realtime=True))
+    assert s.audio == [False, True]
+    (kw, audio_at_start), = s.replies
+    assert audio_at_start == [False]
+    assert kw["instructions"].endswith("Namaste!") and "tool_choice" not in kw
+
+
+def test_realtime_greeting_without_opening_line_is_protected_too():
+    s = _FakeSession()
+    asyncio.run(speak_opening_line(s, object(), "", realtime=True))
+    assert s.audio == [False, True] and s.replies[0][0]["instructions"] == GREET_INSTRUCTIONS
+
+
+def test_caller_audio_comes_back_when_playout_fails_or_hangs(monkeypatch):
+    async def boom():
+        raise RuntimeError("model went away")
+
+    s = _FakeSession(boom)
+    asyncio.run(speak_opening_line(s, object(), "Hi", realtime=True))
+    assert s.audio == [False, True]
+
+    import opening
+
+    monkeypatch.setattr(opening, "OPENING_LINE_MAX_SEC", 0.05)
+    s = _FakeSession(lambda: asyncio.sleep(5))
+    asyncio.run(speak_opening_line(s, object(), "Hi", realtime=True))
+    assert s.audio == [False, True]
+
+
+def test_caller_audio_stays_off_when_the_call_is_ending():
+    class Ender:
+        ending = True
+
+    s = _FakeSession()
+    asyncio.run(speak_opening_line(s, object(), "Hi", realtime=True, ender=Ender()))
+    assert s.audio == [False]
+
+
+def test_pipeline_opening_line_is_unchanged():
+    s = _FakeSession()
+    asyncio.run(speak_opening_line(s, object(), "Namaste!", realtime=False))
+    assert s.said == ["Namaste!"] and s.audio == []
+    s = _FakeSession()
+    asyncio.run(speak_opening_line(s, object(), "", realtime=False))
+    assert s.audio == [] and s.replies[0][0] == {"instructions": GREET_INSTRUCTIONS, "tool_choice": "none"}

@@ -26,7 +26,8 @@ from api_tools import build_api_tools  # noqa: E402
 from end_call import CallEnder, end_call_tool, hang_up_after_goodbye  # noqa: E402
 from call_agent import CallAgent  # noqa: E402
 from capacity import worker_options  # noqa: E402
-from models import build, is_realtime, opening_line_instructions, realtime_call_config, speech_config  # noqa: E402
+from models import build, is_realtime, realtime_call_config, speech_config  # noqa: E402
+from opening import speak_opening_line  # noqa: E402
 from recording import CallRecording, flush_pending, upload  # noqa: E402
 from reporter import CallReporter, iso  # noqa: E402
 from silence import SilenceWatch  # noqa: E402
@@ -283,15 +284,8 @@ async def entrypoint(ctx: JobContext):
 
     ctx.add_shutdown_callback(stop_guard)
 
-    if greeting and realtime:
-        await session.generate_reply(instructions=opening_line_instructions(greeting))
-    elif greeting:
-        say_line = getattr(agent, "say_line", None)  # scripted agents play the cached greeting
-        await (say_line(greeting) if say_line else session.say(greeting))
-    else:
-        instructions = "Greet the user briefly and ask how you can help, in the conversation language."
-        # The opening line must never hang up; a realtime model takes no per-reply tool choice
-        await session.generate_reply(instructions=instructions, **({} if realtime else {"tool_choice": "none"}))
+    # Realtime agents can't be cut off by a "hello" while greeting (see opening.py)
+    await speak_opening_line(session, agent, greeting, realtime=realtime, ender=ender)
 
 
 async def dial(ctx: JobContext, session: AgentSession, agent: Agent, config: dict, reporter: CallReporter, state: dict) -> bool:

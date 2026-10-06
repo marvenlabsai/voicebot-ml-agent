@@ -48,13 +48,23 @@ TTS_BUILDERS = {
 }
 def _gemini_live(c: dict):
     """Gemini Live (e.g. gemini-3.8-live). It picks the spoken language itself (the prompt names
-    it), and 3.8 rejects thinking settings and affective dialog, so neither is sent."""
+    it), and 3.8 rejects thinking settings and affective dialog, so neither is sent.
+
+    Gemini Live's speech detection defaults to high start-of-speech sensitivity, so a cough or a
+    short "hmm" on a phone line cuts the agent off; low sensitivity keeps real interruptions
+    working without that."""
+    from google.genai import types
     from livekit.plugins import google  # only loaded for agents that use it
 
     return google.realtime.RealtimeModel(
         model=c["model"],
         voice=c.get("voiceId") or "Puck",
         api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+            ),
+        ),
     )
 
 
