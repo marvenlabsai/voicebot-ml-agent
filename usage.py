@@ -1,7 +1,8 @@
 """Usage per call, sent to the backend with the `ended` report.
 
 Totals come from the session's own usage summary (one entry per model): LLM tokens, TTS
-characters and seconds of audio, STT seconds of audio. Each model used is listed too, so costs
+characters and seconds of audio, STT seconds of audio (and, for realtime models, the audio part
+of the LLM tokens and the session time). Each model used is listed too, so costs
 can be worked out per provider. Billed telephony minutes are computed by the backend from the
 call's duration. Scripted agents also report their pre-synthesized line cache.
 """
@@ -27,6 +28,7 @@ def usage_report(session: AgentSession, agent: object, transcript: list[dict]) -
         return None
 
     llm = {"inputTokens": 0, "cachedInputTokens": 0, "outputTokens": 0}
+    audio_in = audio_out = 0  # audio part of the LLM tokens (realtime / multimodal models)
     tts = {"characters": 0, "audioSec": 0.0}
     stt = {"audioSec": 0.0}
     realtime_sec = 0.0  # realtime (speech-to-speech) models are billed by session time
@@ -40,10 +42,16 @@ def usage_report(session: AgentSession, agent: object, transcript: list[dict]) -
             llm["outputTokens"] += u.output_tokens
             session = getattr(u, "session_duration", 0.0) or 0.0
             realtime_sec += session
-            entry = {"kind": "llm", **base, "inputTokens": u.input_tokens, "cachedInputTokens": u.input_cached_tokens, "outputTokens": u.output_tokens}
-            if session:
-                entry["sessionSec"] = _r(session)
-            models.append(entry)
+            audio_in += getattr(u, "input_audio_tokens", 0) or 0
+            audio_out += getattr(u, "output_audio_tokens", 0) or 0
+            # Only what was used: calls are numerous, so zero fields are left out
+            extra = {
+                "cachedInputTokens": u.input_cached_tokens,
+                "inputAudioTokens": getattr(u, "input_audio_tokens", 0) or 0,
+                "outputAudioTokens": getattr(u, "output_audio_tokens", 0) or 0,
+                "sessionSec": _r(session),
+            }
+            models.append({"kind": "llm", **base, "inputTokens": u.input_tokens, "outputTokens": u.output_tokens, **{k: v for k, v in extra.items() if v}})
         elif kind == "tts_usage":
             tts["characters"] += u.characters_count
             tts["audioSec"] += u.audio_duration
@@ -51,6 +59,10 @@ def usage_report(session: AgentSession, agent: object, transcript: list[dict]) -
         elif kind == "stt_usage":
             stt["audioSec"] += u.audio_duration
             models.append({"kind": "stt", **base, "audioSec": _r(u.audio_duration)})
+    if audio_in:
+        llm["inputAudioTokens"] = audio_in
+    if audio_out:
+        llm["outputAudioTokens"] = audio_out
     tts["audioSec"] = _r(tts["audioSec"])
     stt["audioSec"] = _r(stt["audioSec"])
 

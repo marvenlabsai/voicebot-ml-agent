@@ -31,6 +31,19 @@ def test_totals_and_models():
     assert "scriptCache" not in r
 
 
+def test_realtime_models_report_audio_tokens_and_session_time():
+    s = _session(
+        LLMModelUsage(provider="google", model="gemini-live", input_tokens=900, output_tokens=300, input_audio_tokens=700, output_audio_tokens=250),
+        LLMModelUsage(provider="openai", model="gpt-live-1", input_tokens=50, output_tokens=20, session_duration=61.234),
+    )
+    r = usage_report(s, SimpleNamespace(), [])
+    assert r["llm"]["inputAudioTokens"] == 700 and r["llm"]["outputAudioTokens"] == 250
+    gemini, gpt = r["models"]
+    assert gemini["inputAudioTokens"] == 700 and gemini["outputAudioTokens"] == 250 and "sessionSec" not in gemini
+    assert gpt["sessionSec"] == 61.23 and "inputAudioTokens" not in gpt and "cachedInputTokens" not in gpt
+    assert r["realtimeSec"] == 61.23
+
+
 def test_scripted_agent_reports_its_line_cache():
     audio = SimpleNamespace(stats={"linesFromCache": 3, "linesSynthesized": 1, "charactersSynthesized": 40, "linesPlayed": 2})
     r = usage_report(_session(), SimpleNamespace(_audio=audio), [])
