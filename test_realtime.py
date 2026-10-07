@@ -65,10 +65,31 @@ def test_builds_gemini_live_without_thinking_settings(monkeypatch):
     assert type(model).__module__.startswith("livekit.plugins.google")
     assert model._opts.model == "gemini-3.8-live" and model._opts.voice == "Kore"
     assert not model._opts.thinking_config  # 3.8 rejects thinking settings
-    # Low start-of-speech sensitivity; speech detection (and barge-in) stays on
-    detection = model._opts.realtime_input_config.automatic_activity_detection
-    assert detection.start_of_speech_sensitivity.value == "START_SENSITIVITY_LOW" and not detection.disabled
+    # Google's default speech detection: nothing sent, Gemini decides turns itself
+    assert not model._opts.realtime_input_config
     assert model.capabilities.turn_detection
+
+
+def test_gemini_start_sensitivity_can_be_set_from_env(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
+    cfg = {**CONFIG, "realtime": {"provider": "google", "model": "gemini-3.8-live", "voiceId": "Kore"}}
+
+    async def run():
+        return build("realtime", speech_config(cfg)["realtime"])
+
+    for level, expected in (("low", "START_SENSITIVITY_LOW"), ("HIGH", "START_SENSITIVITY_HIGH")):
+        monkeypatch.setenv("GEMINI_START_SENSITIVITY", level)
+        detection = asyncio.run(run())._opts.realtime_input_config.automatic_activity_detection
+        assert detection.start_of_speech_sensitivity.value == expected and not detection.disabled
+    monkeypatch.setenv("GEMINI_START_SENSITIVITY", "loud")  # unknown value: Google's default
+    assert not asyncio.run(run())._opts.realtime_input_config
+
+
+def test_only_pipeline_sessions_get_the_local_vad():
+    vad = object()
+    assert agent.session_options(CONFIG, vad) == {}  # realtime: the model detects speech itself
+    pipeline = agent.session_options({**CONFIG, "mode": "pipeline"}, vad)
+    assert pipeline["vad"] is vad and "turn_handling" in pipeline
 
 
 def test_opening_line_is_asked_for_verbatim():

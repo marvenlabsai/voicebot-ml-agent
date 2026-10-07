@@ -19,7 +19,7 @@ from livekit.agents import (  # noqa: E402
     WorkerOptions,
     cli,
 )
-from livekit.agents.voice.events import CloseEvent, ConversationItemAddedEvent  # noqa: E402
+from livekit.agents.voice.events import CloseEvent, ConversationItemAddedEvent, UserInputTranscribedEvent, UserStateChangedEvent  # noqa: E402
 from livekit.plugins import silero  # noqa: E402
 
 from api_tools import build_api_tools  # noqa: E402
@@ -91,15 +91,35 @@ def wants_script(config: dict) -> bool:
     return SCRIPTED_REPLIES and isinstance(config.get("script"), dict)
 
 
-def session_options(config: dict) -> dict:
-    """AgentSession options for this call: turn-taking tuned for phone calls (see turn_taking.py).
-    A realtime model takes its own turns, so it keeps the framework defaults."""
+def watch_what_the_model_hears(session: AgentSession, call_id, parts: dict) -> None:
+    """Realtime calls: log each caller turn the model transcribed (length and language, not the
+    words) and each time it detected the caller talking over the agent, so "it didn't hear me"
+    shows up in the logs."""
+    heard = parts["heard"] = {"turns": 0}
+
+    @session.on("user_input_transcribed")
+    def _heard(ev: UserInputTranscribedEvent):
+        if ev.is_final and (ev.transcript or "").strip():
+            heard["turns"] += 1
+            logger.info("call %s: model heard the caller (turn %d, %d chars, %s)", call_id, heard["turns"], len(ev.transcript), ev.language or "language unknown")
+
+    @session.on("user_state_changed")
+    def _speaking(ev: UserStateChangedEvent):
+        if ev.new_state == "speaking":
+            logger.info("call %s: model detected the caller speaking", call_id)
+
+
+def session_options(config: dict, vad=None) -> dict:
+    """AgentSession options for this call: turn-taking tuned for phone calls (see turn_taking.py),
+    with the local VAD. A realtime model hears the caller and decides turns and interruptions with
+    its own speech detection, so it gets neither: a second, local detector would only cut the
+    agent off on sounds the model didn't count as speech."""
     if is_realtime(config):
         return {}
     # Scripted agents skip preemptive generation: on scripted turns that reply is thrown away,
     # so it would only cost an LLM (and TTS) request per turn.
     stt_provider = speech_config(config)["stt"]["provider"]
-    return {"turn_handling": turn_handling(stt_provider, scripted=wants_script(config))}
+    return {"turn_handling": turn_handling(stt_provider, scripted=wants_script(config)), **({"vad": vad} if vad is not None else {})}
 
 
 def build_agent(
@@ -187,6 +207,8 @@ async def entrypoint(ctx: JobContext):
                 pass  # already reported
             elif state["answered"]:
                 usage = usage_report(parts["session"], parts.get("agent"), transcript) if "session" in parts else None
+                if "heard" in parts:
+                    logger.info("call %s: caller turns the model heard: %d", call_id, parts["heard"]["turns"])
                 await reporter.send("ended", reason=reason or None, transcript=transcript, usage=usage)
             else:
                 await reporter.send("ended", reason="Not answered")
@@ -207,13 +229,14 @@ async def entrypoint(ctx: JobContext):
 
     await ctx.connect()
 
-    # VAD stays on in realtime mode too: it lets the framework notice the caller barging in
     models = (
         {"llm": build("realtime", speech["realtime"])}
         if realtime
         else {"stt": build("stt", speech["stt"]), "llm": build("llm", speech["llm"]), "tts": build("tts", speech["tts"])}
     )
-    session = AgentSession(vad=ctx.proc.userdata["vad"], **models, **session_options(config))
+    session = AgentSession(**models, **session_options(config, ctx.proc.userdata["vad"]))
+    if realtime:
+        watch_what_the_model_hears(session, call_id, parts)
 
     @session.on("conversation_item_added")
     def _on_item(ev: ConversationItemAddedEvent):

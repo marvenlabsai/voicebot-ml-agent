@@ -50,22 +50,33 @@ def _gemini_live(c: dict):
     """Gemini Live (e.g. gemini-3.8-live). It picks the spoken language itself (the prompt names
     it), and 3.8 rejects thinking settings and affective dialog, so neither is sent.
 
-    Gemini Live's speech detection defaults to high start-of-speech sensitivity, so a cough or a
-    short "hmm" on a phone line cuts the agent off; low sensitivity keeps real interruptions
-    working without that."""
-    from google.genai import types
+    Gemini decides turns and interruptions with its own speech detection, at Google's default
+    sensitivity. GEMINI_START_SENSITIVITY=low|high overrides how readily it counts sound as the
+    caller starting to speak (low: fewer accidental interruptions, but quiet or short replies can
+    be missed)."""
     from livekit.plugins import google  # only loaded for agents that use it
 
     return google.realtime.RealtimeModel(
         model=c["model"],
         voice=c.get("voiceId") or "Puck",
         api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
-        realtime_input_config=types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(
-                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
-            ),
-        ),
+        **_gemini_input_config(),
     )
+
+
+def _gemini_input_config() -> dict:
+    """realtime_input_config for GEMINI_START_SENSITIVITY, or nothing (Google's default)."""
+    level = os.getenv("GEMINI_START_SENSITIVITY", "").strip().lower()
+    if level not in ("low", "high"):
+        return {}
+    from google.genai import types
+
+    sensitivity = types.StartSensitivity.START_SENSITIVITY_LOW if level == "low" else types.StartSensitivity.START_SENSITIVITY_HIGH
+    return {
+        "realtime_input_config": types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(start_of_speech_sensitivity=sensitivity),
+        )
+    }
 
 
 REALTIME_BUILDERS = {
